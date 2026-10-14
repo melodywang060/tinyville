@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tiny Smallville</title>
+<style>
+  body { margin:0; font-family: -apple-system, sans-serif; background:#1a1d24; color:#ddd; display:flex; }
+  #wrap { display:flex; width:100%; }
+  #left { flex:1; padding:12px; }
+  #right { width:340px; background:#22262f; padding:12px; overflow-y:auto; height:100vh; box-sizing:border-box; }
+  canvas { background:#2b3242; border-radius:8px; }
+  #bar { margin-bottom:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;}
+  button { background:#3a4256; color:#eee; border:0; border-radius:6px; padding:6px 14px; cursor:pointer; font-size:14px;}
+  button:hover { background:#4a5468; }
+  #clock { font-size:16px; font-weight:600; }
+  #mock { color:#e0a040; font-size:12px; }
+  #events { font-size:12px; color:#9aa3b5; margin-top:8px; max-height:180px; overflow-y:auto;}
+  .evt { padding:2px 0; border-bottom:1px solid #2a3040; }
+  select,input { background:#2b3242; color:#eee; border:1px solid #3a4256; border-radius:4px; padding:5px; font-size:13px;}
+  h3 { margin:12px 0 6px; font-size:14px; color:#8ab4f8; }
+  #agentPanel { font-size:13px; }
+  .mem { padding:3px 0; border-bottom:1px solid #2a3040; font-size:12px; }
+  .kind { color:#8ab4f8; }
+  .planrow { font-size:12px; padding:2px 0; }
+  .planrow.active { color:#7ee0a0; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="left">
+    <div id="bar">
+      <button onclick="post('/run')">▶ Run</button>
+      <button onclick="post('/pause')">⏸ Pause</button>
+      <button onclick="post('/step?n=1')">Step</button>
+      <button onclick="post('/step?n=6')">+1h</button>
+      <span id="clock"></span>
+      <span id="mock"></span>
+    </div>
+    <canvas id="cv" width="960" height="880"></canvas>
+    <div id="events"></div>
+  </div>
+  <div id="right">
+    <div id="agentPanel"><i>Click an agent to inspect them</i></div>
+    <h3>Intervene</h3>
+    <div>
+      <select id="objSel"></select>
+      <input id="objVal" placeholder="new state e.g. burning" size="14">
+      <button onclick="setObj()">Set</button>
+    </div>
+    <div style="margin-top:8px">
+      <select id="agtSel"></select>
+      <input id="agtTxt" placeholder="inner voice says..." size="14">
+      <button onclick="tell()">Tell</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const TILE = 40;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let state = null;
+let selected = null;
+
+async function post(url){ await fetch(url, {method:'POST'}); await refresh(); }
+async function jpost(url, body){
+  await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  await refresh();
+}
+
+async function refresh(){
+  state = await (await fetch('/state')).json();
+  draw();
+  renderSide();
+}
+setInterval(refresh, 800);
+refresh();
+
+cv.addEventListener('click', e => {
+  if(!state) return;
+  const r = cv.getBoundingClientRect();
+  const mx = (e.clientX-r.left), my=(e.clientY-r.top);
+  for(const a of state.agents){
+    const ax=a.x*TILE, ay=a.y*TILE;
+    if((ax-mx)**2+(ay-my)**2 < 20**2){ selected=a.name; renderSide(); return; }
+  }
+});
+
+function draw(){
+  if(!state) return;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.fillStyle='#2b3242'; ctx.fillRect(0,0,cv.width,cv.height);
+
+  for(const [k,d] of Object.entries(state.locations)){
+    const [x,y,w,h]=d.rect;
+    ctx.fillStyle='#353d52';
+    ctx.fillRect(x*TILE,y*TILE,w*TILE,h*TILE);
+    ctx.strokeStyle='#4a5468'; ctx.strokeRect(x*TILE,y*TILE,w*TILE,h*TILE);
+    ctx.fillStyle='#cfd6e4'; ctx.font='bold 14px sans-serif';
+    ctx.fillText(d.label, x*TILE+8, y*TILE+20);
+    // object labels
+    ctx.font='11px sans-serif'; ctx.fillStyle='#8a93a8';
+    let oy = y*TILE+38;
+    for(const obj in state.objects){
+      const [loc,name]=obj.split(':');
+      if(loc===k){ ctx.fillText(`${name}: ${state.objects[obj]}`, x*TILE+8, oy); oy+=14; }
+    }
+  }
+
+  for(const a of state.agents){
+    const ax=a.x*TILE, ay=a.y*TILE;
+    ctx.beginPath(); ctx.arc(ax,ay,12,0,7);
+    ctx.fillStyle=a.color; ctx.fill();
+    if(selected===a.name){ ctx.lineWidth=3; ctx.strokeStyle='#fff'; ctx.stroke(); }
+    ctx.font='18px sans-serif'; ctx.fillText(a.emoji, ax-9, ay-22);
+    ctx.font='10px sans-serif'; ctx.fillStyle='#e8ecf4';
+    ctx.fillText(a.name.split(' ')[0], ax-14, ay+26);
+  }
+
+  document.getElementById('clock').textContent = state.date+' '+state.time;
+  document.getElementById('mock').textContent =
+    (state.mock?'MOCK LLM — ':'')+state.llm_calls+' llm calls';
+  document.getElementById('events').innerHTML =
+    state.events.slice().reverse().map(e=>`<div class="evt">${esc(e)}</div>`).join('');
+
+  const os=document.getElementById('objSel');
+  if(os.options.length===0){
+    for(const k of Object.keys(state.objects)) os.add(new Option(k,k));
+    const as=document.getElementById('agtSel');
+    for(const a of state.agents) as.add(new Option(a.name,a.name));
+  }
+}
+
+async function renderSide(){
+  if(!selected) return;
+  const info = await (await fetch('/agent/'+encodeURIComponent(selected))).json();
+  if(!info.name) return;
+  document.getElementById('agentPanel').innerHTML = `
+    <h3 style="margin-top:0">${info.name}</h3>
+    <div style="font-size:12px;color:#9aa3b5">${esc(info.summary)}</div>
+    <h3>Now</h3><div>${esc(info.action)} @ ${info.location||'?'}</div>
+    <h3>Plan</h3>${info.plan.map(p=>`<div class="planrow ${p.active?'active':''}">${p.time} ${esc(p.desc)} <i>@${p.loc}</i></div>`).join('')}
+    <h3>Reflections</h3>${info.reflections.map(r=>`<div class="mem">💭 ${esc(r)}</div>`).join('')||'<i>none yet</i>'}
+    <h3>Recent memories</h3>${info.memories.slice().reverse().map(m=>`<div class="mem"><span class="kind">[${m.kind}/${m.importance}]</span> ${esc(m.text)}</div>`).join('')}
+  `;
+}
+
+function setObj(){
+  const k=document.getElementById('objSel').value, v=document.getElementById('objVal').value;
+  jpost('/intervene',{kind:'object',target:k,value:v});
+}
+function tell(){
+  const a=document.getElementById('agtSel').value, t=document.getElementById('agtTxt').value;
+  jpost('/intervene',{kind:'tell',agent:a,text:t});
+}
+function esc(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
+</script>
+</body>
+</html>
